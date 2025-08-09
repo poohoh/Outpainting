@@ -1,0 +1,129 @@
+training:
+  pretrained_checkpoint: "/app/checkpoints/pretrained/inpainting/sd-v1-5-inpainting.ckpt"
+  
+  # training hyperparameters
+  num_epochs: 50
+  batch_size: 4
+  lr: 5e-6
+  
+  # advanced fine-tuning settings
+  use_differential_lr: true  # different LR for pretrained vs new layers
+  differential_lr_factor: 0.1
+  warmup_steps: 1000
+  
+  # ema settings
+  use_ema: true
+  ema_decay: 0.9999
+  ema_start_step: 1000
+  ema_update_interval: 1
+  use_ema_for_validation: true
+  save_ema_checkpoint: true
+  
+  # regularization
+  gradient_clip_val: 1.0
+  weight_decay: 0.005
+  
+  # consistency loss
+  use_consistency_loss: true
+  consistency_loss_weight: 0.05
+  
+  # Advanced stability settings
+  use_gradient_checkpointing: true
+  gradient_accumulation_steps: 2
+
+  # early stopping
+  early_stopping_patience: 15
+  early_stopping_min_delta: 1e-5
+  
+  # optimizer
+  optimizer:
+    type: "AdamW"
+    betas: [0.9, 0.999]
+    weight_decay: 0.005
+    eps: 1e-8
+  
+  # scheduler
+  scheduler:
+    type: "cosine"
+    eta_min: 1e-7
+  
+  # logging and saving
+  save_interval: 5
+  log_interval: 50
+  checkpoint_dir: "/app/results/checkpoints"
+
+model:
+  # base_learning_rate: 1.0e-06
+  base_learning_rate: 5e-06
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
+  params:
+    linear_start: 0.0015
+    linear_end: 0.0205
+    log_every_t: 100
+    timesteps: 1000
+    loss_type: l1
+    first_stage_key: image
+    cond_stage_key: masked_image
+    image_size: 512
+    channels: 3
+    concat_mode: true
+    conditioning_key: hybrid
+    monitor: val/loss
+    use_ema: true
+    # scheduler_config:
+    #   target: ldm.lr_scheduler.LambdaWarmUpCosineScheduler
+    #   params:
+    #     verbosity_interval: 0
+    #     warm_up_steps: 1000
+    #     max_decay_steps: 50000
+    #     lr_start: 0.001
+    #     lr_max: 0.1
+    #     lr_min: 0.0001
+    unet_config:
+      target: ldm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        image_size: 32
+        in_channels: 9
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions:
+        - 4
+        - 2
+        - 1
+        num_res_blocks: 2
+        channel_mult:
+        - 1
+        - 2
+        - 4
+        - 4
+        num_heads: 8
+        use_spatial_transformer: true
+        transformer_depth: 1
+        context_dim: 768
+        resblock_updown: false
+    first_stage_config:
+      target: ldm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          attn_type: none
+          double_z: true
+          z_channels: 4
+          resolution: 512
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+    cond_stage_config:
+      target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+      params:
+        version: openai/clip-vit-large-patch14

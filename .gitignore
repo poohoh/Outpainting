@@ -1,6 +1,9 @@
 # Dataset directories
 datasets/
 
+# Model checkpoints
+checkpoints/
+
 # Research papers
 "[ICCV 2025] Progressive Artwork Outpainting via Latent Diffusion Models.pdf"
 *.pdf
