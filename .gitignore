@@ -2,7 +2,8 @@
 datasets/
 
 # Research papers
-[ICCV 2025] Progressive Artwork Outpainting via Latent Diffusion Models.pdf
+"[ICCV 2025] Progressive Artwork Outpainting via Latent Diffusion Models.pdf"
+*.pdf
 
 # Python cache
 __pycache__/
