@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  outpainting:
+    image: base-zsh:latest
+    container_name: outpainting-dev
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=3,4,5
+      - CUDA_VISIBLE_DEVICES=0,1,2
+      - TERM=xterm-256color
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['3', '4', '5']
+              capabilities: [gpu]
+    volumes:
+      - .:/app
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    command: tail -f /dev/null
+    networks:
+      - outpainting-network
+
+networks:
+  outpainting-network:
+    driver: bridge
