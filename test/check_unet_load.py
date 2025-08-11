@@ -23,7 +23,9 @@ def main():
         print("[strict=True] state_dict load success")
     except RuntimeError as e:
         print("[strict=True] load error:", e)
-        model.load_state_dict(sd, strict=False)
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        print(f'missing: {missing}')
+        print(f'unexpected: {unexpected}')
     
     # unet handle
     unet = model.model.diffusion_model
