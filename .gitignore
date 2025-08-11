@@ -1,6 +1,9 @@
 # Dataset directories
 datasets/
 
+# Results
+results/
+
 # Model checkpoints
 checkpoints/
 
