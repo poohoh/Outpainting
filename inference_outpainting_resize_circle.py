@@ -214,9 +214,12 @@ def main():
     print(f"[Info] Processing {num_iterations} batches with {args.batch_size} samples each using circular masking...")
     print(f"[Info] Total images to generate: {num_iterations * args.batch_size}")
     
+    # Create iterator once to get different batches each time
+    data_iterator = iter(loader)
+    
     for iteration in range(num_iterations):
         print(f"\n[Info] Processing batch {iteration + 1}/{num_iterations}...")
-        batch = next(iter(loader))
+        batch = next(data_iterator)
         t0 = time.time()
         
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=(args.precision in ["fp16", "bf16"])):

@@ -168,7 +168,7 @@ def main():
     p.add_argument("--ckpt", type=str, default="checkpoints/pretrained/inpainting/sd-v1-5-inpainting.ckpt", help="Path to sd-v1-5-inpainting checkpoint")
     p.add_argument("--data_root", type=str, default="datasets/humanart", help="Root or annotation source for HumanArtDataset")
     p.add_argument("--outdir", type=str, default="results/inference", help="Base directory for saving outpainting results")
-    p.add_argument("--batch_size", type=int, default=2)
+    p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--steps", type=int, default=50, help="DDIM steps")
     p.add_argument("--scale", type=float, default=7.5, help="Classifier-free guidance scale")
@@ -202,75 +202,102 @@ def main():
         **dataset_kwargs
     )
 
-    # process single batch (for testing/debugging)
-    print(f"[Info] Processing one batch with {args.batch_size} samples ...")
-    batch = next(iter(loader))
-    t0 = time.time()
+    # process multiple batches for more diverse results
+    num_iterations = 5
+    total_images = 0
+    all_batch_times = []
     
-    with torch.no_grad(), torch.cuda.amp.autocast(enabled=(args.precision in ["fp16", "bf16"])):
-        # humanart batch already in correct format
-        x_img = batch["input_images"].to(device)
-        x_mask = batch["masks"].to(device)
-        prompts = batch["prompts"]
-        names = batch["data_keys"]
-        gt_img = batch["ground_truth"].to(device)
-
-        # build conditioning using corrected gradio logic
-        c, uc = prepare_conditioning_correct(model, x_img, x_mask, prompts, scale_factor)
-
-        # sample
-        B, _, H, W = x_img.shape
-        z_shape = (4, H // 8, W // 8)
-        samples, _ = sampler.sample(
-            S=args.steps,
-            conditioning=c,
-            batch_size=B,
-            shape=z_shape,
-            verbose=False,
-            unconditional_guidance_scale=args.scale,
-            unconditional_conditioning=uc,
-            eta=args.eta,
-            x_T=None
-        )
-
-        # decode
-        x_dec = model.decode_first_stage(samples)
-        out_imgs = to_image_uint8(x_dec)  # BHWC, uint8
-        in_imgs = to_image_uint8(x_img)  # BHWC
-        mask_imgs = mask_to_image_uint8(x_mask)  # BHW, uint8 grayscale
-        gt_imgs = to_image_uint8(gt_img)
+    print(f"[Info] Processing {num_iterations} batches with {args.batch_size} samples each using square masking...")
+    print(f"[Info] Total images to generate: {num_iterations * args.batch_size}")
     
-    # save to organized structure
-    for i in range(out_imgs.shape[0]):
-        # set name
-        if len(names) == out_imgs.shape[0]:
-            name = names[i]
-        else:
-            name = f"sample_{i:02d}"
-            if i == 0:
-                print(f"[Warning] Key count mismatch: {len(names)} keys vs {out_imgs.shape[0]} images. Using generic names")
-
-        in_pil = Image.fromarray(in_imgs[i])
-        out_pil = Image.fromarray(out_imgs[i])
-        side = stack_side_by_side(in_pil, out_pil)
-        mask_pil = Image.fromarray(mask_imgs[i], mode="L")  # grayscale mode
-        gt_pil = Image.fromarray(gt_imgs[i])
+    # Create iterator once to get different batches each time
+    data_iterator = iter(loader)
+    
+    for iteration in range(num_iterations):
+        print(f"\n[Info] Processing batch {iteration + 1}/{num_iterations}...")
+        batch = next(data_iterator)
+        t0 = time.time()
         
-        # save to respective directories
-        in_p = inputs_dir / f"{name}.png"
-        out_p = outputs_dir / f"{name}.png"
-        side_p = comparisons_dir / f"{name}.png"
-        mask_p = masks_dir / f"{name}.png"
-        gt_p = inputs_dir / f"{name}_gt.png"
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=(args.precision in ["fp16", "bf16"])):
+            # humanart batch already in correct format
+            x_img = batch["input_images"].to(device)
+            x_mask = batch["masks"].to(device)
+            prompts = batch["prompts"]
+            names = batch["data_keys"]
+            gt_img = batch["ground_truth"].to(device)
 
-        in_pil.save(in_p)
-        out_pil.save(out_p)
-        side.save(side_p)
-        mask_pil.save(mask_p)
-        gt_pil.save(gt_p)
+            # build conditioning using corrected gradio logic
+            c, uc = prepare_conditioning_correct(model, x_img, x_mask, prompts, scale_factor)
 
-    dt = time.time() - t0
-    print(f"[Success] Generated and saved {out_imgs.shape[0]} images in {dt:.2f}s")
+            # sample
+            B, _, H, W = x_img.shape
+            z_shape = (4, H // 8, W // 8)
+            samples, _ = sampler.sample(
+                S=args.steps,
+                conditioning=c,
+                batch_size=B,
+                shape=z_shape,
+                verbose=False,
+                unconditional_guidance_scale=args.scale,
+                unconditional_conditioning=uc,
+                eta=args.eta,
+                x_T=None
+            )
+
+            # decode
+            x_dec = model.decode_first_stage(samples)
+            out_imgs = to_image_uint8(x_dec)  # BHWC, uint8
+            in_imgs = to_image_uint8(x_img)  # BHWC
+            mask_imgs = mask_to_image_uint8(x_mask)  # BHW, uint8 grayscale
+            gt_imgs = to_image_uint8(gt_img)
+        
+        # save to organized structure
+        for i in range(out_imgs.shape[0]):
+            # set name using original names
+            if len(names) == out_imgs.shape[0]:
+                original_name = names[i]
+                name = f"{total_images:03d}_{original_name}"
+            else:
+                name = f"{total_images:03d}_sample"
+                if i == 0:
+                    print(f"[Warning] Key count mismatch: {len(names)} keys vs {out_imgs.shape[0]} images. Using generic names")
+            
+            total_images += 1  # increment counter for each image
+
+            in_pil = Image.fromarray(in_imgs[i])
+            out_pil = Image.fromarray(out_imgs[i])
+            side = stack_side_by_side(in_pil, out_pil)
+            mask_pil = Image.fromarray(mask_imgs[i], mode="L")  # grayscale mode
+            gt_pil = Image.fromarray(gt_imgs[i])
+            
+            # save to respective directories
+            in_p = inputs_dir / f"{name}.png"
+            out_p = outputs_dir / f"{name}.png"
+            side_p = comparisons_dir / f"{name}.png"
+            mask_p = masks_dir / f"{name}.png"
+            gt_p = inputs_dir / f"{name}_gt.png"
+
+            in_pil.save(in_p)
+            out_pil.save(out_p)
+            side.save(side_p)
+            mask_pil.save(mask_p)
+            gt_pil.save(gt_p)
+
+        batch_time = time.time() - t0
+        all_batch_times.append(batch_time)
+        
+        print(f"[Success] Batch {iteration + 1} completed: {out_imgs.shape[0]} images in {batch_time:.2f}s")
+    
+    # final statistics
+    total_time = sum(all_batch_times)
+    avg_time_per_batch = total_time / num_iterations
+    avg_time_per_image = total_time / total_images
+    
+    print(f"\n[Final Results]")
+    print(f"Total images generated: {total_images}")
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Average time per batch: {avg_time_per_batch:.2f}s")
+    print(f"Average time per image: {avg_time_per_image:.2f}s")
 
     print(f"Done. Results saved to: {session_dir}")
 
