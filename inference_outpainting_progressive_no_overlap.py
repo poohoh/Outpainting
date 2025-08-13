@@ -22,12 +22,12 @@ if '/app' not in sys.path:
 from omegaconf import OmegaConf
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
-from data.humanart_resize import create_dataloader
+from data.humanart_progressive import create_progressive_dataloader
 
 def get_9_patch_regions(canvas_size: int = 1536, patch_size: int = 512):
     """
-    1536×1536 캔버스를 9개의 512×512 영역으로 완전 분할
-    중앙은 원본, 나머지 8개는 생성할 영역
+    (512*3)x(512*3) -> 9 patches of (512)x(512)
+    center for original image, rest for generated
     """
     patches = {
         'NW': (0, 0, patch_size, patch_size),                           # (0:512, 0:512)
@@ -44,13 +44,13 @@ def get_9_patch_regions(canvas_size: int = 1536, patch_size: int = 512):
 
 def initialize_canvas_with_center(original_img: torch.Tensor, canvas_size: int = 512*3, patch_size: int = 512):
     """
-    Generate (512*3) x (512*3) canvas and put original image to center position (512, 512)
-    Initialize other regions to black(or noise)
+    Generate (512*3) x (512*3) canvas and put original image to center position
+    Initialize other regions to neutral gray (0 in normalized space)
     """
     B, C, H, W = original_img.shape
     assert H == W == patch_size, f"original image must be {patch_size}x{patch_size}"
 
-    # Generate whole canvas with zero initialized
+    # Generate whole canvas with neutral gray (0 in normalized [-1,1] space)
     canvas = torch.zeros(B, C, canvas_size, canvas_size, device=original_img.device, dtype=original_img.dtype)
 
     # Put original image to center of canvas
@@ -71,6 +71,8 @@ def progressive_outpaint_8_patches(
     seed: int = 42,
     canvas_size: int = 512*3,
     patch_size: int = 512,
+    conditioning_dir: Path = None,  # directory to save conditioning images
+    sample_name: str = "sample",     # sample identifier for file naming
 ):
     """
     Progressive outpainting: generate sequential patches in (512*3) x (512*3) canvas except for center
@@ -104,17 +106,25 @@ def progressive_outpaint_8_patches(
         y0, x0, y1, x1 = patch_regions[patch_name]
         print(f"[Progressive] Patch region: ({y0}:{y1}, {x0}:{x1})")
 
-        # generate empty image
-        # empty_patch = torch.zeros(1, 3, patch_size, patch_size, device=device, dtype=original_img.dtype)
-
-        # values of mask are all 1 (to generate all regions)
+        # resize entire canvas to 512x512 for model conditioning
+        conditioning_img = F.interpolate(canvas, size=(patch_size, patch_size), mode='bilinear', align_corners=False)
+        
+        # save conditioning image for this step
+        if conditioning_dir is not None:
+            conditioning_img_uint8 = to_image_uint8(conditioning_img)
+            conditioning_pil = Image.fromarray(conditioning_img_uint8[0])
+            conditioning_path = conditioning_dir / f"{sample_name}_step{idx+1:02d}_{patch_name}_conditioning.png"
+            conditioning_pil.save(conditioning_path)
+            print(f"[Progressive] Saved conditioning: {conditioning_path.name}")
+        
+        # mask is all 1s (generate entire 512x512 region)
         full_mask = torch.ones(1, patch_size, patch_size, device=device, dtype=torch.float32)
-
-        # generate condition
+            
+        # generate condition with current canvas state
         c, uc = prepare_conditioning_correct(
             model=model,
-            x_img=original_img,
-            x_mask=full_mask.unsqueeze(0),  # [1,1,512,512] -> generate all
+            x_img=conditioning_img,  # entire canvas resized to 512x512
+            x_mask=full_mask.unsqueeze(0),  # [1,1,512,512] -> generate all regions
             prompts=[prompt],
         )
 
@@ -250,17 +260,18 @@ def load_model_from_config(config_path: str, ckpt_path: str, device: torch.devic
     
     return model
 
-def create_output_structure(base_dir: str) -> Tuple[Path, Path, Path, Path, Path]:
+def create_output_structure(base_dir: str) -> Tuple[Path, Path, Path, Path, Path, Path]:
     """
     Create organized output directory structure:
     base_dir/
     └── YYYY-MM-DD_HH-MM-SS_progressive/
-        ├── inputs/      # Input images  
-        ├── outputs/     # AI generated results
-        ├── comparisons/ # Side-by-side comparisons
-        └── masks/       # Mask images
+        ├── inputs/       # Input images  
+        ├── outputs/      # AI generated results
+        ├── comparisons/  # Side-by-side comparisons
+        ├── conditioning/ # Conditioning images for each step
+        └── masks/        # Mask images (kept for compatibility)
 
-    Returns: (session_dir, inputs_dir, outputs_dir, comparisons_dir, masks_dir)
+    Returns: (session_dir, inputs_dir, outputs_dir, comparisons_dir, conditioning_dir, masks_dir)
     """
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     session_dir = Path(base_dir) / f"{timestamp}_progressive"
@@ -268,19 +279,20 @@ def create_output_structure(base_dir: str) -> Tuple[Path, Path, Path, Path, Path
     inputs_dir = session_dir / "inputs"
     outputs_dir = session_dir / "outputs"
     comparisons_dir = session_dir / "comparisons"
-    masks_dir = session_dir / "masks"
+    conditioning_dir = session_dir / "conditioning"  # NEW: conditioning images for each step
+    masks_dir = session_dir / "masks"  # kept for compatibility
 
     # create all directories
-    for dir_path in [inputs_dir, outputs_dir, comparisons_dir, masks_dir]:
+    for dir_path in [inputs_dir, outputs_dir, comparisons_dir, conditioning_dir, masks_dir]:
         dir_path.mkdir(parents=True, exist_ok=True)
     
     print(f"[Info] Results will be saved to: {session_dir}")
     print(f"[Info] - Inputs: {inputs_dir}")
     print(f"[Info] - Outputs: {outputs_dir}")
     print(f"[Info] - Comparisons: {comparisons_dir}")
-    print(f"[Info] - Masks: {masks_dir}")
+    print(f"[Info] - Conditioning: {conditioning_dir}")
 
-    return session_dir, inputs_dir, outputs_dir, comparisons_dir, masks_dir
+    return session_dir, inputs_dir, outputs_dir, comparisons_dir, conditioning_dir, masks_dir
 
 def main():
     p = argparse.ArgumentParser()
@@ -303,18 +315,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # create organized output structure
-    session_dir, inputs_dir, outputs_dir, comparisons_dir, masks_dir = create_output_structure(args.outdir)
+    session_dir, inputs_dir, outputs_dir, comparisons_dir, conditioning_dir, masks_dir = create_output_structure(args.outdir)
     model = load_model_from_config(args.config, args.ckpt, device, args.precision)
     sampler = DDIMSampler(model)
 
-    # build dataloader using HumanArt's create_dataloader
+    # build dataloader using Progressive dataloader
     dataset_kwargs = json.loads(args.dataset_kwargs)
-    loader, _ = create_dataloader(
+    loader, _ = create_progressive_dataloader(
         dataset_root=args.data_root,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
-        return_ground_truth=True,  # for comparison in inference
         **dataset_kwargs
     )
 
@@ -337,11 +348,10 @@ def main():
         t0 = time.time()
 
         # Take only first sample since progressive works with batch_size=1
-        x_img = batch["input_images"][:1].to(device)
-        x_mask = batch["masks"][:1].to(device)
+        original_img = batch["original_images"][:1].to(device)  # Full 512x512 original for comparison
+        center_crop = batch["center_crops"][:1].to(device)     # Center crop 512x512 for initial condition
         prompt = batch["prompts"][0]
         name = batch["data_keys"][0]
-        gt_img = batch["ground_truth"][:1].to(device)
 
         print(f"[Info] Prompt: '{prompt}'")
         print(f"[Info] Sample name: '{name}'")
@@ -351,7 +361,7 @@ def main():
             result_canvas = progressive_outpaint_8_patches(
                 model=model,
                 sampler=sampler,
-                original_img=x_img,
+                original_img=center_crop,  # 512x512 center crop for initial condition
                 prompt=prompt,
                 negative_prompt="",
                 steps=args.steps,
@@ -360,47 +370,45 @@ def main():
                 seed=args.seed + iteration,
                 canvas_size=args.canvas_size,  # 512*3
                 patch_size=args.patch_size,   # 512
+                conditioning_dir=conditioning_dir,  # save conditioning images
+                sample_name=f"{total_images:03d}_{name}",  # unique sample identifier
             )
 
             # convert tensors to images
             # save to compare (512*3) x (512*3) canvas and original img
             out_imgs = to_image_uint8(result_canvas)  # (512*3) x (512*3)
-            in_imgs = to_image_uint8(x_img)  # (512, 512)
-            mask_imgs = mask_to_image_uint8(x_mask)  # (512, 512)
-            gt_imgs = to_image_uint8(gt_img)  # (512, 512)
+            orig_imgs = to_image_uint8(original_img)  # (512, 512) full original
+            crop_imgs = to_image_uint8(center_crop)   # (512, 512) center crop
 
         # save results
         final_name = f"{total_images:03d}_{name}_progressive_8patch"
         total_images += 1
 
         # save original and result images
-        in_pil = Image.fromarray(in_imgs[0])                # 512×512 original
+        orig_pil = Image.fromarray(orig_imgs[0])            # 512×512 full original
+        crop_pil = Image.fromarray(crop_imgs[0])            # 512×512 center crop
         out_pil = Image.fromarray(out_imgs[0])              # 1536×1536 result
-        mask_pil = Image.fromarray(mask_imgs[0], mode="L")   # 512×512 mask
-        gt_pil = Image.fromarray(gt_imgs[0])                # 512×512 gt
         
-        # generate result canvas that contains original image in center
-        in_canvas = Image.new('RGB', (args.canvas_size, args.canvas_size), (0, 0, 0))
+        # generate initial canvas with center crop
+        in_canvas = Image.new('RGB', (args.canvas_size, args.canvas_size), (128, 128, 128))
         center_pos = (args.canvas_size - args.patch_size) // 2
-        in_canvas.paste(in_pil, (center_pos, center_pos))
+        in_canvas.paste(crop_pil, (center_pos, center_pos))
         
         # Compare side-by-side (original canvas vs result)
         side = stack_side_by_side(in_canvas, out_pil)
         
         # save to respective directories
-        in_p = inputs_dir / f"{final_name}_original.png"     # 512×512 origin
-        in_canvas_p = inputs_dir / f"{final_name}_canvas.png" # 1536×1536 center
+        orig_p = inputs_dir / f"{final_name}_original.png"   # 512×512 full original
+        crop_p = inputs_dir / f"{final_name}_center.png"     # 512×512 center crop
+        in_canvas_p = inputs_dir / f"{final_name}_canvas.png" # 1536×1536 initial
         out_p = outputs_dir / f"{final_name}.png"            # 1536×1536 result
         side_p = comparisons_dir / f"{final_name}.png"       # Side-by-side
-        mask_p = masks_dir / f"{final_name}.png"             # mask
-        gt_p = inputs_dir / f"{final_name}_gt.png"           # gt
 
-        in_pil.save(in_p)
+        orig_pil.save(orig_p)
+        crop_pil.save(crop_p)
         in_canvas.save(in_canvas_p)
         out_pil.save(out_p)
         side.save(side_p)
-        mask_pil.save(mask_p)
-        gt_pil.save(gt_p)
 
         batch_time = time.time() - t0
         all_batch_times.append(batch_time)
